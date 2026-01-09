@@ -1,44 +1,132 @@
-# I2C Interface with BMP280 Sensor on Artix-7 FPGA
+# I2C Master for BMP280 Sensor (Verilog)
 
-**Author:** Ramiksha C. Shetty  
-**Target FPGA:** Artix-7 (XC7A50T)  
-**Onboard Clock:** 100 MHz  
-**I2C Speed:** 400 kHz (Fast Mode)  
-**Language:** Verilog HDL  
+## Overview
+This project implements a **custom I2C Master controller in Verilog** to interface with the **BMP280 pressure and temperature sensor**.  
+The design supports:
 
----
+- **Single-byte register write**
+- **3-byte burst read** for extracting **20-bit sensor data**
+- Proper I2C sequencing with START, RESTART, ACK/NACK, and STOP
+- FPGA-ready implementation with **IOBUF-based SDA control**
+- **ILA-compatible debug signals** for real-time protocol inspection
 
-## 📌 Overview
-
-This project implements a **custom I2C Master in Verilog** to interface with the **BMP280 temperature and pressure sensor**, without using any vendor-provided I2C IP cores.
-
-The design is written to be fully **synthesizable**, **timing-correct**, and **FPGA-friendly**, focusing on protocol correctness and clean FSM-based control.
+The controller is optimized for BMP280 register access patterns and is suitable for FPGA-based sensor interfacing and embedded systems.
 
 ---
 
-## ✨ Key Features
-
-- Custom I2C master (no IP cores)
-- 7-bit slave addressing with R/W bit handling
-- Start and Stop condition generation
-- Proper SDA tri-state (open-drain) control
-- Data sampled on **SCL high**, data driven on **SCL low**
-- Clock divider for 400 kHz I2C from 100 MHz system clock
-- Single-byte register read from BMP280 (CHIP ID @ `0xD0`)
-- Verified on real hardware using ILA / logic analysis
-
-> **Note:** ACK/NACK checking is intentionally omitted for simplicity and can be added as an enhancement.
+## Sensor Details
+- Device: **BMP280**
+- Interface: **I2C**
+- Slave Address:  
+  - `0x76` or `0x77` (configurable)
+- Data Format:
+  - Pressure / Temperature data stored as **20-bit values**
+  - Read using **3-byte burst**: MSB, LSB, XLSB
 
 ---
 
-## 🧠 Design Methodology
-
-- FSM-based I2C transaction control
-- Explicit SDA direction control to avoid bus contention
-- Timing aligned with I2C Fast Mode specifications
-- Modular RTL for easy extension and verification
+## Features
+- Fully synthesizable Verilog RTL
+- I2C Master compliant with standard timing
+- Supports:
+  - Register address write
+  - Burst read of 3 consecutive bytes
+- Proper ACK after intermediate bytes
+- NACK after final byte (per I2C spec)
+- Error detection on NACK
+- Busy / Done handshake signals
+- Parameterized clock divider (~400 kHz I2C)
+- **ILA debug visibility of internal FSM and data path**
 
 ---
+
+## Block Diagram
+The block diagram illustrates:
+- I2C Master FSM
+- Clock divider & phase generator
+- SDA bidirectional control using IOBUF
+- Interface to BMP280 sensor
+
+![Block Diagram](Docs/block_diagram.png)
+
+---
+
+## I2C Timing & Waveforms
+The waveform below shows a complete BMP280 read sequence:
+1. START condition  
+2. Slave address + Write  
+3. Register address write  
+4. Repeated START  
+5. Slave address + Read  
+6. 3-byte burst read  
+7. ACK for first two bytes  
+8. NACK for final byte  
+9. STOP condition  
+
+![I2C Waveform](Docs/i2c_waveform.png)
+
+---
+
+## Top-Level Interface
+
+### Clock & Reset
+- `clk` : 100 MHz system clock
+- `rst_n` : Active-low reset
+
+---
+
+### Control Signals
+- `start_write` : Pulse to write a single byte to a BMP280 register
+- `start_read`  : Pulse to initiate a 3-byte burst read
+- `slave_addr`  : 7-bit BMP280 I2C address
+- `reg_addr`    : BMP280 register address
+- `data_in`     : Data byte to write
+- `data_out`    : 20-bit sensor output data
+- `busy`        : High during I2C transaction
+- `done`        : Pulsed when transaction completes
+- `error`       : Set if NACK is detected
+
+---
+
+### I2C Physical Interface
+- `scl` : I2C clock output
+- `sda` : Bidirectional I2C data line (via IOBUF)
+
+---
+
+## Internal Architecture
+
+### Clock Generation
+- System clock: **100 MHz**
+- Target I2C frequency: **~400 kHz**
+- Each I2C bit divided into **4 phases**
+- Clock divider controlled by `CLKDIV` parameter
+
+---
+
+### FSM Design
+The controller uses a **multi-stage FSM** with states including:
+- IDLE
+- START
+- SEND ADDRESS (Write / Read)
+- REGISTER ADDRESS WRITE
+- DATA WRITE
+- RESTART
+- BURST READ
+- ACK / NACK CONTROL
+- STOP
+
+This ensures correct timing and protocol compliance for BMP280 burst reads.
+
+---
+
+## Burst Read Handling (20-bit Data)
+During a read operation:
+- 3 bytes are read sequentially
+- ACK is sent after byte 1 and 2
+- NACK is sent after byte 3
+- Data is assembled as:
+
 
 
 
