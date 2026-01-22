@@ -63,7 +63,7 @@ The waveform below shows a complete BMP280 read sequence:
 8. NACK for final byte  
 9. STOP condition  
 
-![I2C Waveform](Docs/i2c_waveform.png)
+![I2C Waveform](Docs/waveform.png)
 
 ---
 
