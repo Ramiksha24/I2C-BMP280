@@ -1,0 +1,467 @@
+// I2C Master for BMP280 - Simplified Burst Read
+// Single byte write + 3-byte burst read for 20-bit data
+// BMP280 slave address: 0x76 or 0x77
+
+module i2c_eeprom_master (
+    input wire clk,              // 100 MHz
+    input wire rst_n,            
+    
+    // Control
+    input wire start_write,      // Pulse to write single byte
+    input wire start_read,       // Pulse to read 3 bytes (burst)
+    input wire [7:0] slave_addr, // 7-bit address (BMP280: 0x76 or 0x77)
+    input wire [7:0] reg_addr,   // Register address (e.g., 0xF4, 0xFA)
+    input wire [7:0] data_in,    // Single byte to write
+    output reg [19:0] data_out,  // 20-bit burst read output
+    output reg busy,
+    output reg done,
+    output reg error,
+    
+    // I2C Physical Pins
+    output reg scl,
+    inout wire sda,
+    
+    // Debug signals for ILA
+    output wire debug_sda_out,
+    output wire debug_sda_in,
+    output wire debug_sda_en,
+    output wire [3:0] debug_state,
+    output wire [3:0] debug_bit_cnt,
+    output wire [7:0] debug_shift_reg,
+    output wire [1:0] debug_byte_cnt
+);
+
+    parameter CLKDIV = 66;
+    
+    reg [7:0] clk_cnt;
+    reg [2:0] phase;
+    reg phase_tick;
+    
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            clk_cnt <= 0;
+            phase <= 0;
+            phase_tick <= 0;
+        end else if (busy) begin
+            if (clk_cnt >= CLKDIV-1) begin
+                clk_cnt <= 0;
+                phase_tick <= 1;
+                phase <= (phase == 3) ? 0 : phase + 1;
+            end else begin
+                clk_cnt <= clk_cnt + 1;
+                phase_tick <= 0;
+            end
+        end else begin
+            clk_cnt <= 0;
+            phase <= 0;
+            phase_tick <= 0;
+        end
+    end
+    
+    localparam IDLE         = 4'd0,
+               START_BIT    = 4'd1,
+               SEND_ADDR_W  = 4'd2,
+               ACK1         = 4'd3,
+               SEND_REG     = 4'd4,
+               ACK2         = 4'd5,
+               SEND_DATA    = 4'd6,   // For write only
+               ACK3         = 4'd7,
+               RESTART      = 4'd8,   // For read
+               SEND_ADDR_R  = 4'd9,
+               ACK4         = 4'd10,
+               READ_DATA    = 4'd11,
+               SEND_ACK     = 4'd12,  // ACK between bytes
+               SEND_NACK    = 4'd13,  // NACK after last byte
+               STOP_BIT     = 4'd14;
+    
+    reg [3:0] state;
+    reg [3:0] bit_cnt;
+    reg [7:0] shift_reg;
+    reg [7:0] reg_addr_reg;
+    reg [7:0] data_in_reg;
+    reg [23:0] read_buffer;  // Store 3 bytes
+    reg [1:0] byte_cnt;      // 0-2 for 3 bytes
+    reg is_read_op;
+    
+    wire sda_in;
+    reg sda_out;
+    reg sda_en;
+    
+    IOBUF IOBUF_sda (
+        .IO(sda),
+        .I(sda_out),
+        .O(sda_in),
+        .T(sda_en)
+    );
+    
+    assign debug_sda_out = sda_out;
+    assign debug_sda_in = sda_in;
+    assign debug_sda_en = sda_en;
+    assign debug_state = state;
+    assign debug_bit_cnt = bit_cnt;
+    assign debug_shift_reg = shift_reg;
+    assign debug_byte_cnt = byte_cnt;
+    
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            state <= IDLE;
+            scl <= 1;
+            sda_out <= 1;
+            sda_en <= 0;
+            busy <= 0;
+            done <= 0;
+            error <= 0;
+            bit_cnt <= 0;
+            byte_cnt <= 0;
+            data_out <= 0;
+            is_read_op <= 0;
+        end else begin
+            done <= 0;
+            
+            case (state)
+                IDLE: begin
+                    scl <= 1;
+                    sda_out <= 1;
+                    sda_en <= 0;
+                    busy <= 0;
+                    error <= 0;
+                    bit_cnt <= 0;
+                    byte_cnt <= 0;
+                    
+                    if (start_write) begin
+                        busy <= 1;
+                        reg_addr_reg <= reg_addr;
+                        data_in_reg <= data_in;
+                        is_read_op <= 0;
+                        state <= START_BIT;
+                    end else if (start_read) begin
+                        busy <= 1;
+                        reg_addr_reg <= reg_addr;
+                        is_read_op <= 1;
+                        read_buffer <= 0;
+                        state <= START_BIT;
+                    end
+                end
+                
+                START_BIT: begin
+                    if (phase_tick) begin
+                        case (phase)
+                            0: begin
+                                scl <= 1;
+                                sda_out <= 1;
+                                sda_en <= 0;
+                            end
+                            1: sda_out <= 0;
+                            2: scl <= 0;
+                            3: begin
+                                shift_reg <= {slave_addr, 1'b0};
+                                bit_cnt <= 8;
+                                state <= SEND_ADDR_W;
+                            end
+                        endcase
+                    end
+                end
+                
+                SEND_ADDR_W: begin
+                    if (phase_tick) begin
+                        case (phase)
+                            0: begin
+                                scl <= 0;
+                                sda_out <= shift_reg[7];
+                                sda_en <= 0;
+                            end
+                            1: scl <= 1;
+                            2: scl <= 1;
+                            3: begin
+                                scl <= 0;
+                                shift_reg <= {shift_reg[6:0], 1'b0};
+                                bit_cnt <= bit_cnt - 1;
+                                if (bit_cnt == 1)
+                                    state <= ACK1;
+                            end
+                        endcase
+                    end
+                end
+                
+                ACK1: begin
+                    if (phase_tick) begin
+                        case (phase)
+                            0: begin
+                                scl <= 0;
+                                sda_en <= 1;
+                            end
+                            1: scl <= 1;
+                            2: begin
+                                scl <= 1;
+                                if (sda_in) begin
+                                    error <= 1;
+                                    state <= STOP_BIT;
+                                end
+                            end
+                            3: begin
+                                scl <= 0;
+                                if (!error) begin
+                                    shift_reg <= reg_addr_reg;
+                                    bit_cnt <= 8;
+                                    state <= SEND_REG;
+                                end
+                            end
+                        endcase
+                    end
+                end
+                
+                SEND_REG: begin
+                    if (phase_tick) begin
+                        case (phase)
+                            0: begin
+                                scl <= 0;
+                                sda_out <= shift_reg[7];
+                                sda_en <= 0;
+                            end
+                            1: scl <= 1;
+                            2: scl <= 1;
+                            3: begin
+                                scl <= 0;
+                                shift_reg <= {shift_reg[6:0], 1'b0};
+                                bit_cnt <= bit_cnt - 1;
+                                if (bit_cnt == 1)
+                                    state <= ACK2;
+                            end
+                        endcase
+                    end
+                end
+                
+                ACK2: begin
+                    if (phase_tick) begin
+                        case (phase)
+                            0: begin
+                                scl <= 0;
+                                sda_en <= 1;
+                            end
+                            1: scl <= 1;
+                            2: begin
+                                scl <= 1;
+                                if (sda_in) begin
+                                    error <= 1;
+                                    state <= STOP_BIT;
+                                end
+                            end
+                            3: begin
+                                scl <= 0;
+                                if (!error) begin
+                                    if (is_read_op) begin
+                                        state <= RESTART;
+                                    end else begin
+                                        shift_reg <= data_in_reg;
+                                        bit_cnt <= 8;
+                                        state <= SEND_DATA;
+                                    end
+                                end
+                            end
+                        endcase
+                    end
+                end
+                
+                SEND_DATA: begin
+                    if (phase_tick) begin
+                        case (phase)
+                            0: begin
+                                scl <= 0;
+                                sda_out <= shift_reg[7];
+                                sda_en <= 0;
+                            end
+                            1: scl <= 1;
+                            2: scl <= 1;
+                            3: begin
+                                scl <= 0;
+                                shift_reg <= {shift_reg[6:0], 1'b0};
+                                bit_cnt <= bit_cnt - 1;
+                                if (bit_cnt == 1)
+                                    state <= ACK3;
+                            end
+                        endcase
+                    end
+                end
+                
+                ACK3: begin
+                    if (phase_tick) begin
+                        case (phase)
+                            0: begin
+                                scl <= 0;
+                                sda_en <= 1;
+                            end
+                            1: scl <= 1;
+                            2: begin
+                                scl <= 1;
+                                if (sda_in) error <= 1;
+                            end
+                            3: begin
+                                scl <= 0;
+                                state <= STOP_BIT;
+                            end
+                        endcase
+                    end
+                end
+                
+                RESTART: begin
+                    if (phase_tick) begin
+                        case (phase)
+                            0: begin
+                                scl <= 0;
+                                sda_out <= 1;
+                                sda_en <= 0;
+                            end
+                            1: scl <= 1;
+                            2: sda_out <= 0;
+                            3: begin
+                                scl <= 0;
+                                shift_reg <= {slave_addr, 1'b1};
+                                bit_cnt <= 8;
+                                state <= SEND_ADDR_R;
+                            end
+                        endcase
+                    end
+                end
+                
+                SEND_ADDR_R: begin
+                    if (phase_tick) begin
+                        case (phase)
+                            0: begin
+                                scl <= 0;
+                                sda_out <= shift_reg[7];
+                                sda_en <= 0;
+                            end
+                            1: scl <= 1;
+                            2: scl <= 1;
+                            3: begin
+                                scl <= 0;
+                                shift_reg <= {shift_reg[6:0], 1'b0};
+                                bit_cnt <= bit_cnt - 1;
+                                if (bit_cnt == 1)
+                                    state <= ACK4;
+                            end
+                        endcase
+                    end
+                end
+                
+                ACK4: begin
+                    if (phase_tick) begin
+                        case (phase)
+                            0: begin
+                                scl <= 0;
+                                sda_en <= 1;
+                            end
+                            1: scl <= 1;
+                            2: begin
+                                scl <= 1;
+                                if (sda_in) begin
+                                    error <= 1;
+                                    state <= STOP_BIT;
+                                end
+                            end
+                            3: begin
+                                scl <= 0;
+                                if (!error) begin
+                                    byte_cnt <= 0;
+                                    bit_cnt <= 8;
+                                    state <= READ_DATA;
+                                end
+                            end
+                        endcase
+                    end
+                end
+                
+                READ_DATA: begin
+                    if (phase_tick) begin
+                        case (phase)
+                            0: begin
+                                scl <= 0;
+                                sda_en <= 1;
+                            end
+                            1: scl <= 1;
+                            2: begin
+                                scl <= 1;
+                                shift_reg <= {shift_reg[6:0], sda_in};
+                            end
+                            3: begin
+                                scl <= 0;
+                                bit_cnt <= bit_cnt - 1;
+                                if (bit_cnt == 1) begin
+                                    // Store completed byte
+                                    read_buffer <= {read_buffer[15:0], shift_reg[6:0], sda_in};
+                                    byte_cnt <= byte_cnt + 1;
+                                    
+                                    if (byte_cnt == 2)  // Last byte (3rd)
+                                        state <= SEND_NACK;
+                                    else
+                                        state <= SEND_ACK;
+                                end
+                            end
+                        endcase
+                    end
+                end
+                
+                SEND_ACK: begin
+                    if (phase_tick) begin
+                        case (phase)
+                            0: begin
+                                scl <= 0;
+                                sda_out <= 0;  // ACK
+                                sda_en <= 0;
+                            end
+                            1: scl <= 1;
+                            2: scl <= 1;
+                            3: begin
+                                scl <= 0;
+                                bit_cnt <= 8;
+                                state <= READ_DATA;
+                            end
+                        endcase
+                    end
+                end
+                
+                SEND_NACK: begin
+                    if (phase_tick) begin
+                        case (phase)
+                            0: begin
+                                scl <= 0;
+                                sda_out <= 1;  // NACK
+                                sda_en <= 0;
+                            end
+                            1: scl <= 1;
+                            2: scl <= 1;
+                            3: begin
+                                scl <= 0;
+                                // Extract 20 bits: MSB[7:0] LSB[7:0] XLSB[7:4]
+                                data_out <= {read_buffer[23:8], read_buffer[7:4]};
+                                state <= STOP_BIT;
+                            end
+                        endcase
+                    end
+                end
+                
+                STOP_BIT: begin
+                    if (phase_tick) begin
+                        case (phase)
+                            0: begin
+                                scl <= 0;
+                                sda_out <= 0;
+                                sda_en <= 0;
+                            end
+                            1: scl <= 1;
+                            2: sda_out <= 1;
+                            3: begin
+                                done <= 1;
+                                busy <= 0;
+                                state <= IDLE;
+                            end
+                        endcase
+                    end
+                end
+                
+                default: state <= IDLE;
+            endcase
+        end
+    end
+
+endmodule
