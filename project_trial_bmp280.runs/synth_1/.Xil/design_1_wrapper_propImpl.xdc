@@ -1,0 +1,7 @@
+set_property SRC_FILE_INFO {cfile:D:/Kaynes/project_trial_bmp280/project_trial_bmp280.srcs/constrs_1/new/constraint.xdc rfile:../../../project_trial_bmp280.srcs/constrs_1/new/constraint.xdc id:1} [current_design]
+set_property src_info {type:XDC file:1 line:1 export:INPUT save:INPUT read:READ} [current_design]
+set_property PACKAGE_PIN N11 [get_ports clk_in1_0]
+set_property src_info {type:XDC file:1 line:3 export:INPUT save:INPUT read:READ} [current_design]
+set_property PACKAGE_PIN J1 [get_ports scl_0]
+set_property src_info {type:XDC file:1 line:4 export:INPUT save:INPUT read:READ} [current_design]
+set_property PACKAGE_PIN K1 [get_ports sda_0]

@@ -1,0 +1,18 @@
+# Vivado generated files
+*.jou
+*.log
+*.str
+*.cache/
+*.hw/
+*.ip_user_files/
+*.runs/
+*.sim/
+*.gen/
+
+# Project files you don't want tracked
+*.xpr
+
+# OS / editor junk
+.DS_Store
+Thumbs.db
+.vscode/
